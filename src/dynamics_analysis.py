@@ -3,10 +3,14 @@ import torch
 from sklearn.decomposition import PCA
 from sklearn.cross_decomposition import CCA
 
-def compute_pca(activity_data, n_components=20):
-    """Computes PCA on neural activity."""
+def extract_leading_components(neural_activities, n_components=20):
+    """Extract top PCA components from neural activity."""
+    # Concatenate all trials
+    data = np.vstack([trial for trial in neural_activities])
+    # Perform PCA
     pca = PCA(n_components=n_components)
-    return pca.fit_transform(activity_data)
+    pca.fit(data)
+    return pca.components_, pca.explained_variance_ratio_
 
 def compute_cca(activity1, activity2):
     """Computes Canonical Correlation Analysis (CCA) between two datasets."""

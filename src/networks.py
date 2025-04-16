@@ -16,7 +16,7 @@ class Policy(th.nn.Module):
         self.sigma = sigma
         self.noise = th.zeros(output_dim, device = device)
         self.timestep_counter = 0
-        self.resample_threshold = np.random(16, 24)
+        self.resample_threshold = np.random.randint(16, 25)
         self.gru = nn.GRU(input_dim, hidden_dim, 1, batch_first=True)
         self.fc = nn.Linear(hidden_dim, output_dim)
         self.sigmoid = nn.Sigmoid()
@@ -58,7 +58,7 @@ class Policy(th.nn.Module):
 
         self.noise = th.randn_like(self.noise) * self.sigma
         self.timestep_counter = 0
-        self.resample_threshold = np.random.uniform(16, 24)
+        self.resample_threshold = np.random.randint(16, 25)
     
     def init_hidden(self, batch_size):
         weight = next(self.parameters()).data
@@ -68,34 +68,42 @@ class Policy(th.nn.Module):
 class Critic(th.nn.Module):
     def __init__(self, input_size, device):
         super().__init__()
-        self.fc1 = nn.Linear(input_size, 100)
-        self.fc2 = nn.Tanh(100, 64)
-        self.fc3 = nn.Tanh(64, 64)
-        self.fc4 = nn.Linear(64, 1)
         self.device = device
+        
+        # Define network layers properly
+        self.fc1 = nn.Linear(input_size, 100)
+        self.fc2 = nn.Linear(100, 64)
+        self.fc3 = nn.Linear(64, 1)
+        
+        # Activation functions
+        self.tanh = nn.Tanh()
 
         # Apply orthogonal initialization
         self._initialize_weights()
 
-        self.to(device)
+        self.to(self.device)
 
     def _initialize_weights(self):
         """Apply orthogonal initialization with gain=1 and bias=0."""
-        for layer in [self.fc1, self.fc2, self.fc3, self.fc4]:
+        for layer in [self.fc1, self.fc2, self.fc3]:
             nn.init.orthogonal_(layer.weight, gain=1)  # Orthogonal init with gain=1
             nn.init.zeros_(layer.bias)  # Bias = 0
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.fc2(x)
-        x = self.fc3(x)
-        return self.fc4(x)
+        x = self.tanh(self.fc1(x))
+        x = self.tanh(self.fc2(x))
+        return self.fc3(x)
 
 class ACNetwork(ActorCriticPolicy):
-    def __init__(self, observation_space, action_space, lr_schedule, **kwargs):
+    def __init__(self, observation_space, action_space, lr_schedule, device, **kwargs):
+        self._device = device
+        kwargs.pop("device", None)
         super().__init__(observation_space, action_space, lr_schedule, **kwargs)
         self._build_network()
         self.hidden_states = None  # Stores hidden states during rollout
+        self.log_std = nn.Parameter(th.zeros(self.action_dim), requires_grad=True)
+        self.name = 'DefaultPPO'
+        self.to(self._device)
 
     def _build_network(self):
         input_dim = self.observation_space.shape[0]
@@ -103,8 +111,8 @@ class ACNetwork(ActorCriticPolicy):
         self.hidden_dim = 64  # Match your GRU hidden size
 
         # Actor (GRU-based) and Critic
-        self.actor = Policy(input_dim, self.hidden_dim, self.action_dim, self.device)
-        self.critic = Critic(input_dim, self.device)
+        self.actor = Policy(input_dim, self.hidden_dim, self.action_dim, self._device)
+        self.critic = Critic(input_dim, self._device)
 
         # Initialize action distribution (adjust based on your action space)
         self.action_dist = DiagGaussianDistribution(self.action_dim)
@@ -116,23 +124,39 @@ class ACNetwork(ActorCriticPolicy):
             self.hidden_states = self.actor.init_hidden(batch_size)
         
         # Forward through actor and critic
-        actions, new_hidden = self.actor(obs, self.hidden_states)
+        mean_actions, new_hidden = self.actor(obs, self.hidden_states)
         values = self.critic(obs)
         self.hidden_states = new_hidden.detach()  # Detach to prevent BPTT
 
+        self.action_dist.proba_distribution(mean_actions, self.log_std)
+
+        # Sample from distribution
+        actions = self.action_dist.mode() if deterministic else self.action_dist.sample()
+        log_prob = self.action_dist.log_prob(actions)
+
         # Create action distribution (example for continuous actions)
-        log_std = th.ones_like(actions) * self.log_std
-        self.action_dist = DiagGaussianDistribution(actions, log_std)
-        return actions, values, self.action_dist.log_prob(actions)
+        #log_std = th.ones_like(actions) * self.log_std
+        #self.action_dist = DiagGaussianDistribution(actions, log_std)
+        #return actions, values, self.action_dist.log_prob(actions)
+
+        return actions, values, log_prob
 
     def evaluate_actions(self, obs, actions, hidden_states):
         # Evaluate actions for training
         action_pred, _ = self.actor(obs, hidden_states)
         values = self.critic(obs)
+        '''
         log_std = th.ones_like(action_pred) * self.log_std
-        dist = DiagGaussianDistribution(action_pred, log_std)
+        dist = DiagGaussianDistribution(action_pred)
+        dist.log_std = log_std
+        print(f'This is dist: {dist}')
         log_prob = dist.log_prob(actions)
         entropy = dist.entropy()
+        return values, log_prob, entropy
+        '''
+        self.action_dist.proba_distribution(action_pred, self.log_std)
+        log_prob = self.action_dist.log_prob(actions)
+        entropy = self.action_dist.entropy()
         return values, log_prob, entropy
 
     def predict_values(self, obs):
