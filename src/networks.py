@@ -5,6 +5,8 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.type_aliases import TensorDict
 from stable_baselines3.common.distributions import DiagGaussianDistribution
+from stable_baselines3.common.callbacks import BaseCallback
+
 
 class Policy(th.nn.Module):
 
@@ -162,6 +164,144 @@ class ACNetwork(ActorCriticPolicy):
     def predict_values(self, obs):
         return self.critic(obs)
 
+class DummyExtractor(nn.Module):
+    def __init__(self, latent_dim_pi: int, latent_dim_vf: int):
+        super().__init__()
+        # SB3 only needs these for sizing:
+        self.latent_dim_pi = latent_dim_pi
+        self.latent_dim_vf = latent_dim_vf
+
+    def forward(self, features):
+        # SB3 never actually calls it during inference for MLP policies,
+        # but it expects two outputs.
+        return features, features
+
+class CustomActorCriticPolicy(ActorCriticPolicy):
+    """
+    SB3 policy that uses your custom Policy (GRU + noise) as actor
+    and your custom Critic as the value network.
+    Tracks GRU hidden states and respects a 'device' argument.
+    """
+    def __init__(self, observation_space, action_space, lr_schedule, device="cpu", name="DefaultPPO", **kwargs):
+        # 0) Store device & name
+        self._device = th.device(device)
+        self.name    = name
+
+        # 1) Define dims *before* super().__init__
+        obs_dim    = observation_space.shape[0]
+        act_dim    = action_space.shape[0]
+        self.hidden_dim = 64             # <-- must exist for _build_mlp_extractor
+        self.input_dim  = obs_dim
+        self.action_dim = act_dim
+        self.hidden_states = None        # also ready if callbacks reference it
+
+        # 2) Pop any kwarg collisions, then build base
+        kwargs.pop("device", None)
+        super().__init__(observation_space, action_space, lr_schedule, **kwargs)
+
+        # 3) Now build your actual actor & critic
+        self.actor = Policy(self.input_dim,
+                            self.hidden_dim,
+                            self.action_dim,
+                            self._device)
+
+        self.critic = Critic(self.input_dim, self._device)
+
+        # 4) Log‐std & move to device
+        self.log_std = nn.Parameter(th.zeros(self.action_dim,
+                                             device=self._device))
+        self.to(self._device)
+
+    def _build_mlp_extractor(self):
+        # Replace the old Dummy with our Module‐based one:
+        self.mlp_extractor = DummyExtractor(
+            latent_dim_pi=self.hidden_dim,
+            latent_dim_vf=self.hidden_dim,
+        )
+    def forward(self, obs, deterministic=False):
+        """
+        Given observations, returns:
+          - actions  (batch, act_dim)
+          - values   (batch, 1)
+          - log_prob (batch,)
+        """
+        # ensure obs on correct device
+        obs = obs.to(self.device)
+        
+        # init hidden if first call
+        batch_size = obs.shape[0]
+        if self.hidden_states is None:
+            self.hidden_states = self.actor.init_hidden(batch_size)
+        
+        # actor forward
+        mean_actions, new_hidden = self.actor(obs, self.hidden_states)
+        self.hidden_states = new_hidden.detach()  # detach BPTT
+        
+        # critic forward
+        values = self.critic(obs)
+        
+        # build distribution
+        log_std = self.log_std.unsqueeze(0).expand_as(mean_actions)
+        dist = DiagGaussianDistribution(self.action_dim)
+        dist = dist.proba_distribution(mean_actions, log_std)
+        
+        # sample or mode
+        actions = dist.mode() if deterministic else dist.sample()
+        log_prob = dist.log_prob(actions)
+        
+        return actions, values, log_prob
+
+    def evaluate_actions(self, obs, actions, hidden_states=None):
+        """
+        Used by SB3 to compute loss:
+          - returns values, log_prob(actions), entropy
+        """
+        obs = obs.to(self.device)
+        batch_size = obs.shape[0]
+
+         # Handle GRU hidden state properly
+        if hidden_states is not None:
+            h = hidden_states
+        else:
+            # fallback: make sure self.hidden_states has correct batch size
+            if self.hidden_states is None or self.hidden_states.shape[1] != batch_size:
+                h = th.zeros(1, batch_size, self.actor.hidden_dim, device=self.device)
+            else:
+                h = self.hidden_states
+
+        mean_actions, _ = self.actor(obs, h)
+        values = self.critic(obs)
+        
+        log_std = self.log_std.unsqueeze(0).expand_as(mean_actions)
+        dist = DiagGaussianDistribution(self.action_dim)
+        dist = dist.proba_distribution(mean_actions, log_std)
+                
+        log_prob = dist.log_prob(actions)
+        entropy = dist.entropy()
+        return values, log_prob, entropy
+
+    def predict_values(self, obs):
+        obs = obs.to(self.device)
+        return self.critic(obs)
+
+class LossTrackingCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.losses = []
+
+    def _on_step(self) -> bool:
+        # SB3 doesn't expose loss directly, so we approximate it
+        # You could modify PPO class to store actual loss if needed
+        return True
+
+    def _on_rollout_end(self) -> None:
+        # This function is called after each policy update
+        # No real "loss", so you could simulate with mean reward or value loss
+        ep_rewards = self.locals["rollout_buffer"].rewards
+        avg_reward = sum(ep_rewards) / len(ep_rewards)
+        self.losses.append(-avg_reward)  # Just an indicator proxy for loss
+
+
 default_ppo_kwargs = {
     "policy": ACNetwork,  # Use the custom network
     "learning_rate": 3e-4,
@@ -177,3 +317,57 @@ default_ppo_kwargs = {
     "use_sde": False,
     "policy_kwargs": {"enable_critic_lstm": True},  # Enable GRU in policy
 }
+
+# Example usage:
+if __name__ == "__main__":
+
+    DEVICE = "cuda:0" if th.cuda.is_available() else "cpu"
+    n_batch = 1000
+    batch_size = 128
+    total_timesteps = n_batch * batch_size
+    policy_kwargs = {"device": DEVICE, "name": "PPO2"}
+
+    from environment import *
+    from utils import *
+    
+    arm = Arm('arm26')
+    env = RandomTargetReach2(
+        effector=arm.effector, 
+        obs_noise=0.0,
+        proprioception_noise=0.0,
+        vision_noise=0.0,
+        action_noise=0.0
+        )
+    
+    model = PPO(
+        policy=CustomActorCriticPolicy,
+        env=env,
+        policy_kwargs=policy_kwargs,
+        n_steps=2048,
+        batch_size=128,
+        learning_rate=3e-4,
+        n_epochs=10,
+        clip_range=0.2,
+        max_grad_norm=0.5,
+        verbose=1,
+    )
+
+    # Create callback to track loss
+    callback = LossTrackingCallback()
+
+    # 5) Train
+    model.learn(total_timesteps=total_timesteps, callback=callback)
+    plot_loss(callback.losses)
+    evaluate_pretrained(model.po, env, batch_size)
+
+    # -----------------------
+    # Evaluate & Save
+    # -----------------------
+    policy = model.policy
+    try:
+        save_model(policy, callback.losses, env)
+        evaluate_pretrained(policy, env, batch_size)
+    except Exception as e:
+        print("Evaluation failed:", e)
+        save_model(policy, callback.losses, env)
+    

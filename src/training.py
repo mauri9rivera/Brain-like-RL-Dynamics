@@ -4,7 +4,7 @@ import motornet as mn
 import matplotlib.pyplot as plt
 import numpy as np
 
-from environment import CustomReachEnv, create_defaultReachTask, RandomTargetReach
+from environment import *
 from networks import ACNetwork, Policy, Critic, default_ppo_kwargs
 from utils import *
 
@@ -195,11 +195,11 @@ def center_out_task(env, model, n_trials=1000, device="cpu"):
       neural_activities.append(np.array(trial_activity))
       trajectories.append(np.array(trial_traj))
 
-      
-
 
 # Example usage:
 if __name__ == "__main__":
+    
+    DEVICE = 'cpu' #'cuda:0' if th.cuda.is_available else 'cpu'
 
     # Create your effector (for instance, using RigidTendonArm26 with MujocoHillMuscle)
     arm = mn.effector.RigidTendonArm26(muscle=mn.muscle.MujocoHillMuscle())
@@ -217,4 +217,4 @@ if __name__ == "__main__":
     
     # Pretrain the network.
     #pretrain(env)
-    trained_policy, training_losses = pretrain(env, n_batch=1000)
+    trained_policy, training_losses = pretrain(env, device=DEVICE, n_batch=500)

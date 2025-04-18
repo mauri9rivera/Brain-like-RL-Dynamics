@@ -1,7 +1,7 @@
 import motornet as mn
 import numpy as np
 import torch as th
-import matplotlib as plt
+import matplotlib.pyplot as plt
 import math
 
 class Arm:
@@ -13,7 +13,7 @@ class Arm:
         if arm_type == 'arm210':
             self.effector = self.build_arm210(verbose)
         elif arm_type == 'arm26':
-            self.effector = self.build_arm_26(verbose)
+            self.effector = self.build_arm26(verbose)
 
     def build_arm210(self, verbose):
 
@@ -197,218 +197,139 @@ class Arm:
             plt.title(self.effector.muscle_name[m])
         plt.show()
 
-class CustomReachEnv(mn.environment.Environment):
-    def __init__(self, effector, **kwargs):
-        # Set max episode duration to 5 seconds
-        super().__init__(effector, max_ep_duration=5.0, **kwargs)
-        self.device = effector.device
-        # Task parameters
-        self.goal_radius = 0.01  # 1cm in meters
-        self.cue_delay = 0.2     # 200ms before movement allowed
-        self.hold_threshold = int(0.8 / self.dt)  # 800ms in timesteps
-        
-        # State trackers
-        self.current_time = 0.0
-        self.hold_counter = None
-        self.goal_position = None
-
-
-    '''
-    def reset(self, seed=None, options=None):
-        options = options or {}
-        batch_size = options.get("batch_size", 1)
-        
-        # Determine the expected number of joints from the effector's skeleton.
-        n_joints_expected = self.effector.skeleton.state_dim  # e.g. 4
-
-        if hasattr(self.effector, "q_init") and (self.effector.q_init is not None):
-            if self.effector.q_init.numel() == n_joints_expected:
-                q_target = self.effector.q_init
-                if q_target.dim() == 1:
-                    q_target = q_target.unsqueeze(0).expand(batch_size, -1)
-            else:
-                lb = self.effector.pos_lower_bound
-                ub = self.effector.pos_upper_bound
-                # Convert to torch tensors if needed.
-                if isinstance(lb, np.ndarray):
-                    lb = th.tensor(lb, device=self.effector.device, dtype=th.float32)
-                if isinstance(ub, np.ndarray):
-                    ub = th.tensor(ub, device=self.effector.device, dtype=th.float32)
-                q_target = th.rand(batch_size, lb.numel(), device=self.effector.device) * (ub - lb) + lb
-        else:
-            lb = self.effector.pos_lower_bound
-            ub = self.effector.pos_upper_bound
-            if isinstance(lb, np.ndarray):
-                lb = th.tensor(lb, device=self.effector.device, dtype=th.float32)
-            if isinstance(ub, np.ndarray):
-                ub = th.tensor(ub, device=self.effector.device, dtype=th.float32)
-            q_target = th.rand(batch_size, lb.numel(), device=self.effector.device) * (ub - lb) + lb
-
-        cart_target = self.effector.joint2cartesian(q_target)
-        q_start = q_target + th.randn_like(q_target) * 0.01
-
-        options["joint_state"] = q_start
-        obs, info = super().reset(seed=seed, options=options)
-
-        self.goal_position = cart_target
-        self.current_time = 0.0
-        self.hold_counter = th.zeros(batch_size, device=self.effector.device)
-        info["goal"] = cart_target
-        return obs, info
-    
-    '''
-    def reset(self, seed=None, options=None):
-        options = options or {}
-        batch_size = options.get("batch_size", 1)
-        
-        # Get position bounds only (exclude velocity bounds)
-        pos_lb = self.effector.pos_lower_bound
-        pos_ub = self.effector.pos_upper_bound
-        
-        # Convert to tensors if needed
-        if isinstance(pos_lb, np.ndarray):
-            pos_lb = th.tensor(pos_lb, device=self.device, dtype=th.float32)
-        if isinstance(pos_ub, np.ndarray):
-            pos_ub = th.tensor(pos_ub, device=self.device, dtype=th.float32)
-        
-        # Generate random TARGET positions within joint limits
-        q_pos_target = th.rand(batch_size, pos_lb.numel(), device=self.device) * (pos_ub - pos_lb) + pos_lb
-        
-        # Create full joint state (positions + zero velocities)
-        q_target = th.cat([
-            q_pos_target,
-            th.zeros((batch_size, pos_lb.numel()), device=self.device)  # Zero velocities
-        ], dim=-1)
-        
-        # Create START position 1cm from target (Cartesian space)
-        cart_target = self.effector.joint2cartesian(q_target)
-        cart_start = cart_target + th.randn_like(cart_target) * 0.01  # ~1cm noise
-        
-        # Find joint angles for start position (with velocities)
-        q_start = th.cat([
-            q_pos_target + th.randn_like(q_pos_target) * 0.01,  # Perturbed positions
-            th.zeros_like(q_pos_target)  # Zero velocities
-        ], dim=-1)
-
-        # Reset environment with modified positions
-        options["joint_state"] = q_start
-        obs, info = super().reset(seed=seed, options=options)
-        
-        # Store task parameters
-        self.goal_position = cart_target
-        self.current_time = 0.0
-        self.hold_counter = th.zeros(batch_size, device=self.device)
-        info["goal"] = cart_target
-
-        return obs, info
-
-    def step(self, action, deterministic=False):
-        # 1. Handle pre-cue phase (first 200ms)
-        if self.current_time < self.cue_delay:
-            action = th.zeros_like(action)  # Freeze actions before cue
-
-        # 2. Perform environment step
-        obs, reward, terminated, truncated, info = super().step(
-            action, deterministic=deterministic
-        )
-        
-        # 3. Update timers
-        self.current_time += self.dt
-        
-        # 4. Calculate target proximity
-        fingertip_pos = info["states"]["fingertip"]
-        dist_to_target = th.norm(fingertip_pos - self.goal_position, dim=-1)
-        in_target = dist_to_target < self.goal_radius
-        
-        # 5. Update hold counter
-        self.hold_counter = th.where(in_target, self.hold_counter + 1, 0)
-        
-        # 6. Early termination check
-        terminated = terminated | (self.hold_counter >= self.hold_threshold)
-        
-        return obs, reward, terminated, truncated, info
-
-    def get_obs(self, action=None, deterministic=False):
-        # Add go-cue signal to observations
-        base_obs = super().get_obs(action, deterministic)
-        cue_signal = (self.current_time >= self.cue_delay).float().unsqueeze(-1)
-        return th.cat([base_obs, cue_signal], dim=-1)
-
 class CenterOutReachEnv(mn.environment.Environment):
+    """
+    A custom CenterOut Reaching task.
+    - The effector starts at the origin.
+    - A target is drawn from 8 possible directions
+    - A 200 ms go-cue delay is imposed durhing which no movement is allows
+    - Episodes last for 1 seconds (max_ep_duration=1.0 s)
+    - The episode terminates early if the effector's endpoint stays within the target 
+         region for at least 500 ms.
+       - The reward is given by the L1 norm from the goal and the target
+    """
     def __init__(self, effector, **kwargs):
-        super().__init__(effector, max_ep_duration=5.0, **kwargs)
-        self.device = effector.device
         # Task parameters
-        self.goal_radius = 0.01  # 1cm target radius
+        self.distance_criteria = 0.005 # 0.5cm radius from target
+        self.goal_radius = 0.08  # 1cm target radius
         self.cue_delay = 0.2     # 200ms before movement allowed
-        self.hold_threshold = int(0.8 / self.dt)  # 800ms in timesteps
+        self.dt = kwargs.pop("dt", 0.02)  # default timestep
+        self.elapsed = 0.0 # elapsed time in the episode
+        self.hold_time = 0.0
+        self.hold_threshold = 0.5  # 800ms in timesteps
+        self.directions = th.linspace( start=0,end=2 * math.pi * (1 - 1/8), steps=8, device=effector.device) # Directions (8 evenly spaced angles)
+        super().__init__(effector, max_ep_duration=5.0, **kwargs)
         
-        # Directions (8 evenly spaced angles)
-        self.directions = th.linspace(0, 2*math.pi, 8, endpoint=False)
-        
-        # State tracking
-        self.current_time = 0.0
-        self.hold_counter = None
-        self.goal_position = None
-        self.center_position = None
-
+                
+    
     def reset(self, seed=None, options=None):
+        self._set_generator(seed)  # set PRNG seeds
         options = options or {}
         batch_size = options.get("batch_size", 1)
+        deterministic: bool = options.get('deterministic', False)
         
-        # 1. Reset to center position
+        # 1. Reset to DEFAULT joint position (don't override joint_state)
+        joint_states = self.effector.draw_fixed_states(batch_size, th.tensor([1.3, 1.4], dtype=th.float32))
+        options['joint_state'] = joint_states
         obs, info = super().reset(seed=seed, options=options)
         
-        # 2. Get center position from initial state
-        self.center_position = self.effector.joint2cartesian(
-            self.effector.joint_states.q
-        )
+        # 2. Get DEFAULT start position from actual fingertip location
+        start_pos = info["states"]["fingertip"][:, :2]  # Shape: (batch, 2)
         
-        # 3. Randomly select directions for each batch element
-        dir_idx = th.randint(0, 8, (batch_size,))
+        # 3. Randomly select directions
+        dir_idx = th.randint(0, 8, (batch_size,), device=self.device)
         angles = self.directions[dir_idx]
         
-        # 4. Calculate target positions (center + direction vector)
+        # 4. Calculate targets RELATIVE TO ACTUAL START POSITION
         dx = self.goal_radius * th.cos(angles)
         dy = self.goal_radius * th.sin(angles)
-        self.goal_position = self.center_position + th.stack([dx, dy], dim=-1)
-        
-        # 5. Initialize counters
-        self.current_time = 0.0
-        self.hold_counter = th.zeros(batch_size, device=self.device)
-        info["goal"] = self.goal_position
+        self.goal = start_pos + th.stack([dx, dy], dim=-1)  # Save as instance var
 
-        return obs, info
+        # 5. Update info and timers
+        info["goal"] = self.goal
+        self.elapsed = 0.0
+        self.hold_time = th.zeros(batch_size, device=self.device)
+
+        # 6. Initialize observation buffers.
+        action = th.zeros((batch_size, self.muscle.n_muscles)).to(self.device)
+        self.obs_buffer["proprioception"] = [self.get_proprioception()] * len(self.obs_buffer["proprioception"])
+        self.obs_buffer["vision"] = [self.get_vision()] * len(self.obs_buffer["vision"])
+        self.obs_buffer["action"] = [action] * self.action_frame_stacking
+
+        # 7. Get the initial observation.
+        obs = self.get_obs(deterministic=deterministic)
+        info.update({
+        "states": self.states,
+        "action": action,
+        "noisy action": action,  # no noise at reset
+        })
+        
+        obs = self.to_numpy(obs)
+        reward = reward.detach().cpu().numpy()
+        terminated = terminated.detach().cpu().numpy()
+        truncated = truncated if isinstance(truncated, bool) else truncated.detach().cpu().numpy()
+
+        return obs, reward, terminated.all(), truncated, info
+
+    def to_numpy(self, x):
+        if isinstance(x, th.Tensor):
+            return x.detach().cpu().numpy()
+        return x
+
+    def apply_noise(self, loc, noise):
+        """
+        Override the default noise application to disable noise.
+        This method returns the input `loc` unchanged.
+        """
+        return loc
 
     def step(self, action, deterministic=False):
+        """
+        Perform one simulation step.
+        
+        - During the first 200ms (cue_delay), actions are suppressed (set to zero) so that the effector stays
+          at the starting position.
+        - After stepping the environment, update the elapsed time.
+        - Track the time the effector's endpoint (fingertip) remains within the target.
+        - Terminate early if the hold time exceeds the threshold (500ms).
+        - Compute the reward according to the L1 norm from the goal
+        """
+        if not isinstance(action, th.Tensor):
+            action = th.as_tensor(action, device=self.device, dtype=th.float32)
+        else:
+            action = action.clone().detach().to(device=self.device, dtype=th.float32)
         # Freeze actions during cue delay
-        if self.current_time < self.cue_delay:
+        if self.elapsed < self.cue_delay:
             action = th.zeros_like(action)
             
         # Perform environment step
-        obs, reward, terminated, truncated, info = super().step(
-            action, deterministic=deterministic
-        )
+        obs, _, terminated, truncated, info = super().step(action, deterministic=deterministic)
+        self.elapsed += self.dt
         
-        # Update timers
-        self.current_time += self.dt
-        
-        # Calculate target proximity
-        fingertip_pos = info["states"]["fingertip"]
-        dist_to_target = th.norm(fingertip_pos - self.goal_position, dim=-1)
-        in_target = dist_to_target < self.goal_radius
-        
-        # Update hold counter and check termination
-        self.hold_counter = th.where(in_target, self.hold_counter + 1, 0)
-        terminated = terminated | (self.hold_counter >= self.hold_threshold)
-        
-        return obs, reward, terminated, truncated, info
+        # Calculate distance to TARGET (using saved self.goal)
+        fingertip_pos = info["states"]["fingertip"][:, :2]
+        dist = th.norm(fingertip_pos - self.goal, dim=-1)
 
+        # Update hold time individually for each element
+        within_target = dist < self.distance_criteria
+        self.hold_time = th.where(within_target,
+                                self.hold_time + self.dt,
+                                th.zeros_like(self.hold_time))
+        
+        # Terminate early if hold_time exceeds the threshold (0.8 seconds).
+        terminated = self.hold_time >= self.hold_threshold
+
+        #Compute reward as described:
+        reward = -dist.unsqueeze(-1) # ensure shape is (batch_size, 1)
+        
+        return obs, reward, terminated.all(), truncated, info
+    '''
     def get_obs(self, action=None, deterministic=False):
         # Add go-cue signal to observations
         base_obs = super().get_obs(action, deterministic)
         cue_signal = (self.current_time >= self.cue_delay).float().unsqueeze(-1)
         return th.cat([base_obs, cue_signal], dim=-1)
+    '''
 
 class RandomTargetReach(mn.environment.Environment):
     """A custom reaching task:
@@ -428,7 +349,7 @@ class RandomTargetReach(mn.environment.Environment):
     
     def __init__(self, effector, **kwargs):
         # Set task-specific parameters:
-        self.target_radius = 0.01       # 1 cm radius target in meters
+        self.target_radius = 1.0      # 1 cm radius target in meters
         self.cue_delay = 0.2            # 200 ms no-move phase
         # We assume the environment's dt is defined (e.g. dt = 0.02 s)
         self.dt = kwargs.pop("dt", 0.02)  # default timestep
@@ -470,7 +391,7 @@ class RandomTargetReach(mn.environment.Environment):
         unit_direction = rand_direction / norm
 
         # Scale the unit direction to exactly 1 cm.
-        offset = 0.01 * unit_direction
+        offset = self.target_radius * unit_direction
         cart_goal = cart_start
         cart_goal[:2] = cart_start[:2] + offset
 
@@ -609,7 +530,179 @@ class RandomTargetReach(mn.environment.Environment):
 
         return q_start
 
+class RandomTargetReach2(mn.environment.Environment):
+    """A custom reaching task:
+       - The effector starts  n a random state drawn uniformly from the joint space 
+       - The target is drawn uniformly at a state 1 cm away from the origin in Cartesian space.
+       - A 200 ms go-cue delay is imposed during which no movement is allowed.
+       - Episodes last for 5 seconds (max_ep_duration=5.0 s).
+       - The episode terminates early if the effector's endpoint stays within the target 
+         region for at least 800 ms.
+       - The reward is given by: 
+           Rₗ = - y_pos * L1_norm(xₜ - xₜ′) - y_ctrl * ( (uₜ * f / ∥f∥₂²)² ),
+         with
+           y_pos = 0 if ∥xₜ - xₜ′∥₂ < r, else 1, and
+           y_ctrl = 1 if ∥xₜ - xₜ′∥₂ < r, else 0.03.
+    """
+    
+    def __init__(self, effector, **kwargs):
+        # Set task-specific parameters:
+        self.distance_criteria = 0.005 # 0.5cm radius from target
+        self.target_radius = 0.01     # 1 cm radius target 
+        self.cue_delay = 0.2            # 200 ms no-move phase
+        # We assume the environment's dt is defined (e.g. dt = 0.02 s)
+        self.dt = kwargs.pop("dt", 0.02)  # default timestep
+        self.hold_threshold = 0.8       # 800 ms hold threshold (in seconds)
+        self.elapsed = 0.0              # elapsed time in the episode
+        self.hold_time = 0.0            # duration the effector is continuously within target
 
+        # Pass max_ep_duration to parent (5 seconds)
+        kwargs.setdefault("max_ep_duration", 5.0)
+        super().__init__(effector, **kwargs)
+        self.__name__ = "RandomTargetReach"
+    
+    def reset(self, *, seed: int | None = None, options: dict | None = None) -> tuple:
+        """
+        Reset the environment:
+          - Draw a random target joint state as starting position
+          - Define a target that is 1 cm away from the origin.
+          - Reset internal timers and observation buffers.
+        """
+        self._set_generator(seed)  # set PRNG seeds
+        options = {} if options is None else options
+        batch_size = options.get("batch_size", 1)
+        deterministic: bool = options.get('deterministic', False)
+
+        # 1. Generate q_target as a random position 1cm from the origin TODO
+        '''
+        rand_direction = th.randn((batch_size, 2), device=self.device)
+        norm = th.norm(rand_direction, dim=1, keepdim=True)
+        norm = th.where(norm < 1e-6, th.ones_like(norm), norm)
+        unit_direction = rand_direction / norm
+        rand_pos = self.target_radius * unit_direction
+        rand_pos = th.clamp(
+            rand_pos,
+            min=th.tensor(self.effector.pos_lower_bound[None, :]),  
+            max=th.tensor(self.effector.pos_upper_bound[None, :])) # Ensure positions are within effector's workspace bounds
+        q_target = th.stack([
+            self.effector.draw_fixed_states(1, pos.unsqueeze(0))
+            for pos in rand_pos], dim=0).squeeze(1)
+        #q_target = self.effector.draw_fixed_states(batch_size, rand_pos)
+        ''' 
+        q_target = self.effector.draw_random_uniform_states(batch_size)
+
+        # 2. Generate q_start drawn uniformly from joint space
+        q_start = self.effector.draw_random_uniform_states(batch_size)
+
+        # 3. Reset the effector using the start joint state.
+        options["joint_state"] = q_start
+        obs, info = super().reset(seed=seed, options=options)
+        
+        # 4. Set the goal.
+        cart_goal = self.joint2cartesian(q_target)
+        self.goal = cart_goal if self.differentiable else self.detach(cart_goal)
+        info["goal"] = cart_goal
+        
+        # 5. Reset internal timers.
+        self.elapsed = 0.0
+        self.hold_time = th.zeros(batch_size, device=self.device)
+
+        # 6. Initialize observation buffers.
+        action = th.zeros((batch_size, self.muscle.n_muscles)).to(self.device)
+        self.obs_buffer["proprioception"] = [self.get_proprioception()] * len(self.obs_buffer["proprioception"])
+        self.obs_buffer["vision"] = [self.get_vision()] * len(self.obs_buffer["vision"])
+        self.obs_buffer["action"] = [action] * self.action_frame_stacking
+
+        # 7. Get the initial observation.
+        obs = self.get_obs(deterministic=deterministic)
+        info.update({
+        "states": self.states,
+        "action": action,
+        "noisy action": action,  # no noise at reset
+        })
+        return obs, info
+
+    def apply_noise(self, loc, noise):
+        """
+        Override the default noise application to disable noise.
+        This method returns the input `loc` unchanged.
+        """
+        return loc
+    
+    def step(self, action, deterministic: bool = False) -> tuple:
+        """
+        Perform one simulation step.
+        
+        - During the first 200ms (cue_delay), actions are suppressed (set to zero) so that the effector stays
+          at the starting position.
+        - After stepping the environment, update the elapsed time.
+        - Track the time the effector's endpoint (fingertip) remains within the target.
+        - Terminate early if the hold time exceeds the threshold (800ms).
+        - Compute the reward according to:
+             Rₗ = - y_pos * L1_norm(xₜ - xₜ′) - y_ctrl * ( (uₜ * f / ∥f∥₂²)² ),
+          where:
+             y_pos = 0 if ∥xₜ - xₜ′∥₂ < r, else 1
+             y_ctrl = 1 if ∥xₜ - xₜ′∥₂ < r, else 0.03.
+        """
+        if not isinstance(action, th.Tensor):
+            action = th.as_tensor(action, device=self.device, dtype=th.float32)
+        else:
+            action = action.clone().detach().to(device=self.device, dtype=th.float32)
+
+        # Freeze actions during the cue delay.
+        if self.elapsed < self.cue_delay:
+            action = th.zeros_like(action)
+        
+        # Step the simulation using the parent method.
+        obs, _, terminated, truncated, info = super().step(action, deterministic=deterministic)
+        self.elapsed += self.dt
+        
+        # Compute the distance between the fingertip and the goal.
+        fingertip = info["states"]["fingertip"]
+        dist = th.norm(fingertip - self.goal[:, :2], dim=-1)  # L2 norm per batch
+        
+        # Update hold time individually for each element
+        within_target = dist < self.distance_criteria
+        self.hold_time = th.where(within_target,
+                                self.hold_time + self.dt,
+                                th.zeros_like(self.hold_time))
+            
+        # Terminate early if hold_time exceeds the threshold (0.8 seconds).
+        terminated = self.hold_time >= self.hold_threshold
+        
+        # Compute reward:
+        # Define y_pos and y_ctrl based on the distance.
+        y_pos = th.where(within_target, th.tensor(0.0, device=action.device), th.tensor(1.0, device=action.device))
+        y_ctrl = th.where(within_target, th.tensor(1.0, device=action.device), th.tensor(0.03, device=action.device))
+        
+        # L1 norm between current position (xₜ) and goal (xₜ′):
+        pos_error = th.sum(th.abs(fingertip - self.goal[:, :2]), dim=-1)
+        
+        # Assume f is maximum isometric contraction vector
+        f = th.tensor(self.effector.tobuild__muscle['max_isometric_force'], dtype=th.float32)
+        norm_f_squared = th.norm(f.clone().detach(), p=2) ** 2
+        f_expanded = f.expand_as(action)
+        # Compute the control term: square of (uₜ * f / norm_f_squared)
+        ctrl_term = th.sum((action * f_expanded / norm_f_squared) ** 2, dim=-1)
+        
+        # Compute reward as described:
+        reward = - y_pos * pos_error - y_ctrl * ctrl_term
+        reward = reward.unsqueeze(-1)  # ensure shape is (batch_size, 1)
+        
+        # Optionally, add reward components to info for debugging:
+        info["reward_components"] = {"pos_error": pos_error, "ctrl_term": ctrl_term}
+        
+        obs = self.to_numpy(obs)
+        reward = reward.detach().cpu().numpy()
+        terminated = terminated.detach().cpu().numpy()
+        truncated = truncated if isinstance(truncated, bool) else truncated.detach().cpu().numpy()
+
+        return obs, reward, terminated.all(), truncated, info
+
+    def to_numpy(self, x):
+        if isinstance(x, th.Tensor):
+            return x.detach().cpu().numpy()
+        return x
 
 def create_defaultReachTask(effector):
 

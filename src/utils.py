@@ -51,6 +51,26 @@ def load_environment(cfg_file, verbose=False):
 
     return cfg
 
+def load_model2(env, model_class, weight_file, device='cpu'):
+    model = model_class(env.observation_space, env.action_space, 
+                       lr_schedule=lambda _: 0, device=device)
+    
+    state_dict = th.load(weight_file, map_location=device)
+    
+    # Filter compatible parameters
+    model_dict = model.state_dict()
+    filtered = {k: v for k, v in state_dict.items() 
+               if k in model_dict and v.shape == model_dict[k].shape}
+    
+    # Partial load + warnings
+    model_dict.update(filtered)
+    model.load_state_dict(model_dict)
+    
+    missing = set(state_dict.keys()) - set(filtered.keys())
+    print(f"Loaded {len(filtered)}/{len(state_dict)} params. Missing: {missing}")
+    
+    return model
+
 def load_model(env, model_class, weight_file, device='cpu'):
 
     model = model_class(env.observation_space, env.action_space, lambda epoch: 3e-5,device)
@@ -83,7 +103,7 @@ def plot_simulations(xy, target_xy):
     plt.ylabel("Y distance to target")
     plt.show()
 
-def evaluate_pretrained(policy, env, batch_size):
+def simulate_pretrained(policy, env, batch_size):
     """Evaluation function with hidden state management"""
     # Reset hidden states
     policy.hidden_states = policy.actor.init_hidden(batch_size)
@@ -96,8 +116,11 @@ def evaluate_pretrained(policy, env, batch_size):
 
     # Run evaluation episode
     while not terminated:
-        action, _, _ = policy(obs, deterministic=True)  # Deterministic actions
-        obs, _, terminated, _, info = env.step(action)
+        # Convert numpy array to tensor first
+        obs_tensor = obs.clone().detach().requires_grad_(True)
+
+        action, _, _ = policy(obs_tensor.unsqueeze(0), deterministic=True)  # Deterministic actions
+        obs, _, terminated, _, info = env.step(action.squeeze(0).cpu().numpy())
         xy.append(info["states"]["fingertip"][:, None, :])
         tg.append(info["goal"][:, None, :])
 
@@ -116,6 +139,40 @@ def plot_loss(losses):
     plt.tight_layout()
     plt.show()
 
+def visualize_task(env, n_batch=1):
+    """Visualizes all start positions and targets with proper labels and sizing."""
+    # Reset environment and get positions
+    _, info = env.reset(options={"batch_size": n_batch})
+    starts = info["states"]["fingertip"].cpu().numpy()[:, :2]
+    targets = info["goal"].cpu().numpy()[:, :2]
+
+    # Create plot with locked axes
+    plt.figure(figsize=(8, 8))
+    ax = plt.gca()
+    ax.set_xlim(-0.75, 0.75)
+    ax.set_ylim(-0.5, 1)
+    ax.set_aspect('equal', adjustable='box')
+
+    # Plot ALL starts and targets first with labels
+    ax.scatter(starts[:, 0], starts[:, 1], 
+               color='blue', alpha=0.7, s=100, label='Start')
+    ax.scatter(targets[:, 0], targets[:, 1], 
+               color='red', alpha=0.7, s=50, label='Target')
+
+    # Add connection lines
+    for i in range(n_batch):
+        ax.plot([starts[i, 0], targets[i, 0]],
+                [starts[i, 1], targets[i, 1]], 
+                'k--', linewidth=1, alpha=0.5)
+
+    # Add labels and grid
+    ax.set_xlabel('X position (m)')
+    ax.set_ylabel('Y position (m)')
+    ax.set_title(f'Start/Target Positions (n={n_batch})')
+    ax.legend()
+    ax.grid(True)
+    plt.show()
+    
 def visualize_center_out(trajectories):
     """Plot end-effector trajectories for all trials."""
     plt.figure(figsize=(10, 6))
@@ -127,18 +184,57 @@ def visualize_center_out(trajectories):
     plt.grid(True)
     plt.show()
 
+def visualize_trajectories(trajectories, start_pos=None, targets=None):
+    """
+    Visualize trajectories for any type of reaching task
+    
+    Args:
+        trajectories: List of numpy arrays containing end effector positions
+        start_pos: (Optional) Initial position(s) as numpy array (single or per-trial)
+        targets: (Optional) Target positions as numpy array (single or per-trial)
+    """
+    plt.figure(figsize=(10, 8))
+    
+    # Plot all trajectories
+    for i, traj in enumerate(trajectories):
+        # Main trajectory path
+        plt.plot(traj[:, 0], traj[:, 1], alpha=0.4, linewidth=0.8, c='blue')
+        
+        # Plot start and end markers
+        start = traj[0] if start_pos is None else start_pos[i] if len(start_pos) > 1 else start_pos
+        end = traj[-1] if targets is None else targets[i] if len(targets) > 1 else targets
+        
+        plt.scatter(start[0], start[1], c='green', s=60, marker='o', edgecolors='k')
+        plt.scatter(end[0], end[1], c='red', s=60, marker='s', edgecolors='k')
+
+    # Add labels and decorations
+    plt.title("Movement Trajectories", fontsize=14)
+    plt.xlabel("X Position (m)", fontsize=12)
+    plt.ylabel("Y Position (m)", fontsize=12)
+    plt.grid(True)
+    plt.axis('equal')
+    
+    # Create legend
+    legend_elements = [
+        plt.Line2D([0], [0], marker='o', color='w', label='Start', 
+                  markersize=10, markerfacecolor='g', markeredgecolor='k'),
+        plt.Line2D([0], [0], marker='s', color='w', label='Target', 
+                  markersize=10, markerfacecolor='r', markeredgecolor='k')
+    ]
+    plt.legend(handles=legend_elements)
+    
+    plt.show()
+
 # Example usage:
 if __name__ == "__main__":
 
     # Create your effector (for instance, using RigidTendonArm26 with MujocoHillMuscle)
     arm = mn.effector.RigidTendonArm26(muscle=mn.muscle.MujocoHillMuscle())
 
-    from environment import RandomTargetReach
-    from networks import *
-    # Instantiate the custom reach environment.
-    #env = create_defaultReachTask(arm)
-    #env = CustomReachEnv(effector=arm)
-    env = RandomTargetReach(
+    from environment import *
+    from networks import Policy, Critic, CustomActorCriticPolicy, DummyExtractor
+    
+    env2 = RandomTargetReach2(
     effector=arm,
     obs_noise=0.0,
     proprioception_noise=0.0,
@@ -146,6 +242,8 @@ if __name__ == "__main__":
     action_noise=0.0
     )
 
-    net = load_model(env, ACNetwork, './outputs/savedmodels/2025-04-15/DefaultPPO/weights')
-    evaluate_pretrained(net, env, 100)
+
+    #env = create_defaultReachTask(arm)
+    net = load_model(env2, CustomActorCriticPolicy, './outputs/savedmodels/2025-04-17/PPO2/weights')
+    simulate_pretrained(net, env2, 25)
     
