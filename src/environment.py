@@ -263,7 +263,7 @@ class CenterOutReachEnv(mn.environment.Environment):
         "action": action,
         "noisy action": action,  # no noise at reset
         })
-        
+
         obs = self.to_numpy(obs)
         reward = reward.detach().cpu().numpy()
         terminated = terminated.detach().cpu().numpy()
@@ -703,6 +703,147 @@ class RandomTargetReach2(mn.environment.Environment):
         if isinstance(x, th.Tensor):
             return x.detach().cpu().numpy()
         return x
+
+class ForbiddenRectangleReach(RandomTargetReach2):
+    """A custom reaching task that punishes passing through a forbidden rectangle."""
+    
+    def __init__(self, effector, **kwargs):
+        self.forbidden_rect = (-0.2, 0.3, 0.2, 0.4)  # xmin, ymin, xmax, ymax
+        self.penalty = -10000.0  # Heavy penalty for passing through the rectangle
+        self.prev_fingertip = None
+        self.__name__ = "ForbiddenRectangleReach"
+        super().__init__(effector, **kwargs)
+        
+        
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None) -> tuple:
+        options = {} if options is None else options
+        batch_size = options.get("batch_size", 1)
+        deterministic = options.get('deterministic', False)
+
+        q_target = self.generate_valid_q(batch_size, is_target=True)
+        q_start = self.generate_valid_q(batch_size, is_target=False)
+
+        # Reset effector with new q_start
+        options["joint_state"] = q_start
+        obs, info = super().reset(seed=seed, options=options)
+
+        # Update goal to new q_target
+        cart_goal = self.joint2cartesian(q_target)
+        self.goal = cart_goal if self.differentiable else self.detach(cart_goal)
+        info["goal"] = cart_goal
+
+        # Store initial fingertip position
+        self.prev_fingertip = info["states"]["fingertip"].clone()
+
+        return obs, info
+
+    def step(self, action, deterministic: bool = False) -> tuple:
+        obs, reward, terminated, truncated, info = super().step(action, deterministic)
+
+        current_fingertip = info["states"]["fingertip"]
+        if self.prev_fingertip is not None:
+            x0 = self.prev_fingertip[:, 0]
+            y0 = self.prev_fingertip[:, 1]
+            x1 = current_fingertip[:, 0]
+            y1 = current_fingertip[:, 1]
+            intersects = self.liang_barsky_batch(x0, y0, x1, y1, self.forbidden_rect)
+            reward[intersects] += self.penalty
+
+        self.prev_fingertip = current_fingertip.clone()
+
+        return obs, reward, terminated, truncated, info
+
+    @staticmethod
+    def liang_barsky_batch(x0, y0, x1, y1, rect):
+        dx = x1 - x0
+        dy = y1 - y0
+        p = th.stack([-dx, dx, -dy, dy], dim=1)
+        q = th.stack([x0 - rect[0], rect[2] - x0, y0 - rect[1], rect[3] - y0], dim=1)
+
+        t0 = th.zeros_like(x0)
+        t1 = th.ones_like(x0)
+
+        for i in range(4):
+            mask_p_ne_zero = p[:, i] != 0
+            if not th.any(mask_p_ne_zero):
+                continue
+            t = q[:, i] / p[:, i]
+            if i % 2 == 0:
+                mask_p_neg = mask_p_ne_zero & (p[:, i] < 0)
+                t0 = th.where(mask_p_neg, th.maximum(t0, t), t0)
+                mask_p_pos = mask_p_ne_zero & (p[:, i] > 0)
+                t1 = th.where(mask_p_pos, th.minimum(t1, t), t1)
+            else:
+                mask_p_neg = mask_p_ne_zero & (p[:, i] < 0)
+                t1 = th.where(mask_p_neg, th.minimum(t1, t), t1)
+                mask_p_pos = mask_p_ne_zero & (p[:, i] > 0)
+                t0 = th.where(mask_p_pos, th.maximum(t0, t), t0)
+
+        intersects = (t0 <= t1) & (t0 < 1.0) & (t1 > 0.0)
+        return intersects
+
+    def generate_valid_q(self, batch_size, is_target=False):
+        """Generates valid joint states ensuring Cartesian positions are outside the forbidden rectangle."""
+        if is_target:
+            # Generate target positions 1cm from origin in Cartesian space, then convert to joint states
+            rand_direction = th.randn((batch_size, 2), device=self.device)
+            norm = th.norm(rand_direction, dim=1, keepdim=True)
+            norm = th.where(norm < 1e-6, th.ones_like(norm), norm)
+            unit_direction = rand_direction / norm
+            rand_pos = self.target_radius * unit_direction
+            rand_pos = th.clamp(rand_pos,
+                                min=th.tensor(self.effector.pos_lower_bound, device=self.device),
+                                max=th.tensor(self.effector.pos_upper_bound, device=self.device))
+            
+            # Reject positions inside forbidden area
+            x_in = (rand_pos[:, 0] >= self.forbidden_rect[0]) & (rand_pos[:, 0] <= self.forbidden_rect[2])
+            y_in = (rand_pos[:, 1] >= self.forbidden_rect[1]) & (rand_pos[:, 1] <= self.forbidden_rect[3])
+            in_forbidden = x_in & y_in
+            invalid_indices = th.where(in_forbidden)[0]
+
+            while invalid_indices.numel() > 0:
+                new_dir = th.randn(invalid_indices.size(0), 2, device=self.device)
+                new_norm = th.norm(new_dir, dim=1, keepdim=True)
+                new_norm = th.where(new_norm < 1e-6, th.ones_like(new_norm), new_norm)
+                new_unit = new_dir / new_norm
+                new_pos = self.target_radius * new_unit
+                new_pos = th.clamp(new_pos,
+                                min=th.tensor(self.effector.pos_lower_bound, device=self.device),
+                                max=th.tensor(self.effector.pos_upper_bound, device=self.device))
+                x_in_new = (new_pos[:, 0] >= self.forbidden_rect[0]) & (new_pos[:, 0] <= self.forbidden_rect[2])
+                y_in_new = (new_pos[:, 1] >= self.forbidden_rect[1]) & (new_pos[:, 1] <= self.forbidden_rect[3])
+                new_invalid = x_in_new & y_in_new
+                valid = ~new_invalid
+                valid_indices = invalid_indices[valid]
+                if valid_indices.numel() > 0:
+                    rand_pos[valid_indices] = new_pos[valid]
+                invalid_indices = invalid_indices[new_invalid]
+
+            q = th.stack([self.effector.draw_fixed_states(1, pos.unsqueeze(0)) for pos in rand_pos], dim=0).squeeze(1)
+        else:
+            # Generate joint states and check Cartesian positions
+            q = self.effector.draw_random_uniform_states(batch_size)
+            cart = self.joint2cartesian(q)
+            x_in = (cart[:, 0] >= self.forbidden_rect[0]) & (cart[:, 0] <= self.forbidden_rect[2])
+            y_in = (cart[:, 1] >= self.forbidden_rect[1]) & (cart[:, 1] <= self.forbidden_rect[3])
+            in_forbidden = x_in & y_in
+            invalid_indices = th.where(in_forbidden)[0]
+
+            while invalid_indices.numel() > 0:
+                new_q = self.effector.draw_random_uniform_states(invalid_indices.size(0))
+                new_cart = self.joint2cartesian(new_q)
+                x_in_new = (new_cart[:, 0] >= self.forbidden_rect[0]) & (new_cart[:, 0] <= self.forbidden_rect[2])
+                y_in_new = (new_cart[:, 1] >= self.forbidden_rect[1]) & (new_cart[:, 1] <= self.forbidden_rect[3])
+                new_invalid = x_in_new & y_in_new
+                valid = ~new_invalid
+                valid_indices_invalid = invalid_indices[valid]
+                if valid_indices_invalid.numel() > 0:
+                    q[valid_indices_invalid] = new_q[valid]
+                    cart[valid_indices_invalid] = new_cart[valid]
+                invalid_indices = invalid_indices[new_invalid]
+
+        return q
 
 def create_defaultReachTask(effector):
 

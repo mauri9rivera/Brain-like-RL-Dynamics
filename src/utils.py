@@ -119,8 +119,8 @@ def simulate_pretrained(policy, env, batch_size):
         # Convert numpy array to tensor first
         obs_tensor = obs.clone().detach().requires_grad_(True)
 
-        action, _, _ = policy(obs_tensor.unsqueeze(0), deterministic=True)  # Deterministic actions
-        obs, _, terminated, _, info = env.step(action.squeeze(0).cpu().numpy())
+        action, _, _ = policy(obs_tensor, deterministic=True)  # Deterministic actions
+        obs, _, terminated, _, info = env.step(action)
         xy.append(info["states"]["fingertip"][:, None, :])
         tg.append(info["goal"][:, None, :])
 
@@ -234,6 +234,7 @@ if __name__ == "__main__":
     from environment import *
     from networks import Policy, Critic, CustomActorCriticPolicy, DummyExtractor
     
+    #save model struggles
     env2 = RandomTargetReach2(
     effector=arm,
     obs_noise=0.0,
@@ -241,9 +242,17 @@ if __name__ == "__main__":
     vision_noise=0.0,
     action_noise=0.0
     )
-
-
     #env = create_defaultReachTask(arm)
-    net = load_model(env2, CustomActorCriticPolicy, './outputs/savedmodels/2025-04-17/PPO2/weights')
-    simulate_pretrained(net, env2, 25)
+    #net = load_model(env2, CustomActorCriticPolicy, './outputs/savedmodels/2025-04-17/PPO2/weights')
+    #print(f'Size of attributes... \n obs: {net.input_dim} \n act: {net.action_dim} \n')
+    #simulate_pretrained(net, env2, 25)
+
+    obstacle_env = ForbiddenRectangleReach(effector=arm,
+    obs_noise=0.0,
+    proprioception_noise=0.0,
+    vision_noise=0.0,
+    action_noise=0.0
+    )
+
+    visualize_task(obstacle_env, n_batch=100)
     
