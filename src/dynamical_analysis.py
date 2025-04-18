@@ -3,12 +3,8 @@ import sys
 import numpy as np
 import matplotlib.pyplot as plt
 
-# 1. Clone and import the Dynamical Similarity Analysis (DSA) repo
-if not os.path.isdir('DSA'):
-    !git clone https://github.com/mitchellostrow/DSA.git
-sys.path.append('DSA')
 
-from dsa.dsa import DND, Procrustes
+from dsa_repo.DSA.dsa import DND, Procrustes
 
 # 2. Load your precomputed PCA neural activity
 #    Assume `neural_activity1` and `neural_activity2` are numpy arrays of shape (T, 20)
