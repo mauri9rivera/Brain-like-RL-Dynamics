@@ -12,7 +12,7 @@ from sklearn.cross_decomposition import CCA
 def save_model(model, losses, env):
 
     #Create model directory
-    base_dir = os.path.join("outputs", "savedmodels")
+    base_dir = os.path.join("../outputs", "savedmodels")
     today = datetime.now().strftime("%Y-%m-%d")
     date_dir = os.path.join(base_dir, today)
     os.makedirs(date_dir, exist_ok=True)

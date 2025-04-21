@@ -5,6 +5,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.type_aliases import TensorDict
 from stable_baselines3.common.distributions import DiagGaussianDistribution
+from collections import deque
 
 class Policy(th.nn.Module):
 
@@ -95,14 +96,16 @@ class Critic(th.nn.Module):
         return self.fc3(x)
 
 class ACNetwork(ActorCriticPolicy):
-    def __init__(self, observation_space, action_space, lr_schedule, device, **kwargs):
+    def __init__(self, observation_space, action_space, lr_schedule, device, name='DefaultPPO', **kwargs):
         self._device = device
         kwargs.pop("device", None)
+        self.name = name
         super().__init__(observation_space, action_space, lr_schedule, **kwargs)
         self._build_network()
         self.hidden_states = None  # Stores hidden states during rollout
         self.log_std = nn.Parameter(th.zeros(self.action_dim), requires_grad=True)
-        self.name = 'DefaultPPO'
+         # Buffer to track recent returns for statistics
+        self.return_buffer = deque(maxlen=20)
         self.to(self._device)
 
     def _build_network(self):
@@ -139,7 +142,7 @@ class ACNetwork(ActorCriticPolicy):
         #self.action_dist = DiagGaussianDistribution(actions, log_std)
         #return actions, values, self.action_dist.log_prob(actions)
 
-        return actions, values, log_prob
+        return actions, values, log_prob, self.hidden_states
 
     def evaluate_actions(self, obs, actions, hidden_states):
         # Evaluate actions for training

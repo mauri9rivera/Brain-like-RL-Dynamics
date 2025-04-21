@@ -4,7 +4,7 @@ import motornet as mn
 import matplotlib.pyplot as plt
 import numpy as np
 
-from environment import CustomReachEnv, create_defaultReachTask, RandomTargetReach
+from environment import create_defaultReachTask, RandomTargetReach
 from networks import ACNetwork, Policy, Critic, default_ppo_kwargs
 from utils import *
 
