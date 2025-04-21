@@ -1,0 +1,5 @@
+ppo:
+  total_timesteps: 100000
+  batch_size: 128
+  policy_net_arch: [64]
+  critic_net_arch: [100, 64, 64]
