@@ -428,6 +428,7 @@ class RandomTargetReach(mn.environment.Environment):
     
     def __init__(self, effector, **kwargs):
         # Set task-specific parameters:
+        self.distance_criteria = 0.005 # 0.5cm radius from target
         self.target_radius = 0.01       # 1 cm radius target in meters
         self.cue_delay = 0.2            # 200 ms no-move phase
         # We assume the environment's dt is defined (e.g. dt = 0.02 s)
@@ -454,31 +455,16 @@ class RandomTargetReach(mn.environment.Environment):
         batch_size = options.get("batch_size", 1)
         deterministic: bool = options.get('deterministic', False)
 
-        # 1. Sample a random start joint state from the full joint space.
-        q_start = self.effector.draw_random_uniform_states(batch_size)  # shape: (batch_size, n_joints)
-        
-        # Convert joint state to Cartesian coordinates.
-        cart_start = self.joint2cartesian(q_start)
-
-        # 2. Compute a random 1 cm offset in Cartesian space.
-        # Generate a random direction vector with the same shape as cart_start.
-        rand_direction = th.randn_like(cart_start[:2])
-        # Normalize the direction vector (for each sample).
-        norm = th.norm(rand_direction, dim=1, keepdim=True)
-        # Avoid division by zero.
-        norm = th.where(norm < 1e-6, th.ones_like(norm), norm)
-        unit_direction = rand_direction / norm
-
-        # Scale the unit direction to exactly 1 cm.
-        offset = 0.01 * unit_direction
-        cart_goal = cart_start
-        cart_goal[:2] = cart_start[:2] + offset
+        # 1. Sample random start joint state from the full joint space.
+        q_target = self.effector.draw_random_uniform_states(batch_size)  # shape: (batch_size, n_joints)
+        q_start = self.effector.draw_random_uniform_states(batch_size)
 
         # 4. Reset the effector using the start joint state.
         options["joint_state"] = q_start
         obs, info = super().reset(seed=seed, options=options)
         
-        # 5. Set the goal.
+        # 4. Set the goal.
+        cart_goal = self.joint2cartesian(q_target)
         self.goal = cart_goal if self.differentiable else self.detach(cart_goal)
         info["goal"] = cart_goal
         
@@ -539,7 +525,7 @@ class RandomTargetReach(mn.environment.Environment):
         
         # Update hold time: if every element in batch is within the target radius, increment hold_time.
         # (You can modify this if handling batches differently.)
-        if (dist < self.target_radius).all():
+        if (dist < self.distance_criteria).all():
             self.hold_time += self.dt
         else:
             self.hold_time = 0.0
@@ -550,8 +536,8 @@ class RandomTargetReach(mn.environment.Environment):
         
         # Compute reward:
         # Define y_pos and y_ctrl based on the distance.
-        y_pos = th.where(dist < self.target_radius, th.tensor(0.0, device=action.device), th.tensor(1.0, device=action.device))
-        y_ctrl = th.where(dist < self.target_radius, th.tensor(1.0, device=action.device), th.tensor(0.03, device=action.device))
+        y_pos = th.where(dist < self.distance_criteria, th.tensor(0.0, device=action.device), th.tensor(1.0, device=action.device))
+        y_ctrl = th.where(dist < self.distance_criteria, th.tensor(1.0, device=action.device), th.tensor(0.03, device=action.device))
         
         # L1 norm between current position (xₜ) and goal (xₜ′):
         pos_error = th.sum(th.abs(fingertip - self.goal[:, :2]), dim=-1)

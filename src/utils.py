@@ -3,8 +3,11 @@ import torch as th
 import json 
 from datetime import datetime
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 import motornet as mn
-
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.cross_decomposition import CCA
 
 def save_model(model, losses, env):
 
@@ -127,25 +130,96 @@ def visualize_center_out(trajectories):
     plt.grid(True)
     plt.show()
 
-# Example usage:
-if __name__ == "__main__":
+def visualize_task(env, n_batch=1, is_obstacle=False):
+    """Visualizes all start positions and targets with proper labels and sizing."""
+    # Reset environment and get positions
+    _, info = env.reset(options={"batch_size": n_batch})
+    starts = info["states"]["fingertip"].cpu().numpy()[:, :2]
+    targets = info["goal"].cpu().numpy()[:, :2]
 
-    # Create your effector (for instance, using RigidTendonArm26 with MujocoHillMuscle)
-    arm = mn.effector.RigidTendonArm26(muscle=mn.muscle.MujocoHillMuscle())
+    # Create plot with locked axes
+    plt.figure(figsize=(8, 8))
+    ax = plt.gca()
+    ax.set_xlim(-0.75, 0.75)
+    ax.set_ylim(-0.5, 1)
+    ax.set_aspect('equal', adjustable='box')
 
-    from environment import RandomTargetReach
-    from networks import *
-    # Instantiate the custom reach environment.
-    #env = create_defaultReachTask(arm)
-    #env = CustomReachEnv(effector=arm)
-    env = RandomTargetReach(
-    effector=arm,
-    obs_noise=0.0,
-    proprioception_noise=0.0,
-    vision_noise=0.0,
-    action_noise=0.0
-    )
+    # Add obstacle rectangle if requested
+    if is_obstacle:
+        rect_params = (-0.3, 0.3, 0.2, 0.4)  # xmin, ymin, xmax, ymax
+        width = rect_params[2] - rect_params[0]
+        height = rect_params[3] - rect_params[1]
+        obstacle = Rectangle(
+            (rect_params[0], rect_params[1]),
+            width,
+            height,
+            facecolor='#CCCCCC',
+            edgecolor='none',
+            alpha=1.0,
+            zorder=1  # Ensure rectangle is behind other elements
+        )
+        ax.add_patch(obstacle)
 
-    net = load_model(env, ACNetwork, './outputs/savedmodels/2025-04-15/DefaultPPO/weights')
-    evaluate_pretrained(net, env, 100)
+    # Plot ALL starts and targets first with labels
+    ax.scatter(starts[:, 0], starts[:, 1], 
+               color='blue', alpha=0.7, s=100, label='Start', zorder=3)
+    ax.scatter(targets[:, 0], targets[:, 1], 
+               color='red', alpha=0.7, s=50, label='Target', zorder=3)
+
+    # Add connection lines
+    for i in range(n_batch):
+        ax.plot([starts[i, 0], targets[i, 0]],
+                [starts[i, 1], targets[i, 1]], 
+                'k--', linewidth=1, alpha=0.5, zorder=2)
+
+    # Add labels and grid
+    ax.set_xlabel('X position (m)')
+    ax.set_ylabel('Y position (m)')
+    ax.set_title(f'Start/Target Positions (n={n_batch})')
+    ax.legend()
+    ax.grid(True)
+    plt.show()
+
+def visualize_trajectories(trajectories, start_pos=None, targets=None):
+    """
+    Visualize trajectories for any type of reaching task
+    
+    Args:
+        trajectories: List of numpy arrays containing end effector positions
+        start_pos: (Optional) Initial position(s) as numpy array (single or per-trial)
+        targets: (Optional) Target positions as numpy array (single or per-trial)
+    """
+    plt.figure(figsize=(10, 8))
+    
+    # Plot all trajectories
+    for i, traj in enumerate(trajectories):
+        # Main trajectory path
+        plt.plot(traj[:, 0], traj[:, 1], alpha=0.4, linewidth=0.8, c='blue')
+        
+        # Plot start and end markers
+        start = traj[0] if start_pos is None else start_pos[i] if len(start_pos) > 1 else start_pos
+        end = traj[-1] if targets is None else targets[i] if len(targets) > 1 else targets
+        
+        plt.scatter(start[0], start[1], c='green', s=60, marker='o', edgecolors='k')
+        plt.scatter(end[0], end[1], c='red', s=60, marker='s', edgecolors='k')
+
+    # Add labels and decorations
+    plt.title("Movement Trajectories", fontsize=14)
+    plt.xlabel("X Position (m)", fontsize=12)
+    plt.ylabel("Y Position (m)", fontsize=12)
+    plt.grid(True)
+    plt.axis('equal')
+    
+    # Create legend
+    legend_elements = [
+        plt.Line2D([0], [0], marker='o', color='w', label='Start', 
+                  markersize=10, markerfacecolor='g', markeredgecolor='k'),
+        plt.Line2D([0], [0], marker='s', color='w', label='Target', 
+                  markersize=10, markerfacecolor='r', markeredgecolor='k')
+    ]
+    plt.legend(handles=legend_elements)
+    
+    plt.show()
+
+    
     

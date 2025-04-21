@@ -154,7 +154,7 @@ def pretrain(env, device="cpu", n_batch=6000, batch_size=128):
 
         # Final operations
         save_model(policy, losses, env)  # Save model
-        evaluate_pretrained(policy, env, batch_size)  # Evaluation
+        evaluate_pretrained(policy, env, 100)  # Evaluation
         plot_loss(losses)  # Plotting
 
     except:
@@ -195,8 +195,6 @@ def center_out_task(env, model, n_trials=1000, device="cpu"):
       neural_activities.append(np.array(trial_activity))
       trajectories.append(np.array(trial_traj))
 
-      
-
 
 # Example usage:
 if __name__ == "__main__":
@@ -217,4 +215,5 @@ if __name__ == "__main__":
     
     # Pretrain the network.
     #pretrain(env)
-    trained_policy, training_losses = pretrain(env, n_batch=1000)
+    trained_policy, training_losses = pretrain(env, n_batch=500)
+  
