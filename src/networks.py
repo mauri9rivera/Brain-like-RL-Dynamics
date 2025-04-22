@@ -53,7 +53,9 @@ class Policy(th.nn.Module):
         if self.timestep_counter >= self.resample_threshold:
             self.resample_noise()
 
-        return u + self.noise, h
+        noisy_action = u + self.noise
+        noisy_action = th.clamp(noisy_action, 0.0, 1.0)
+        return u + noisy_action, h
     
     def resample_noise(self):
 
@@ -137,26 +139,12 @@ class ACNetwork(ActorCriticPolicy):
         actions = self.action_dist.mode() if deterministic else self.action_dist.sample()
         log_prob = self.action_dist.log_prob(actions)
 
-        # Create action distribution (example for continuous actions)
-        #log_std = th.ones_like(actions) * self.log_std
-        #self.action_dist = DiagGaussianDistribution(actions, log_std)
-        #return actions, values, self.action_dist.log_prob(actions)
-
         return actions, values, log_prob, self.hidden_states
 
     def evaluate_actions(self, obs, actions, hidden_states):
         # Evaluate actions for training
         action_pred, _ = self.actor(obs, hidden_states)
         values = self.critic(obs)
-        '''
-        log_std = th.ones_like(action_pred) * self.log_std
-        dist = DiagGaussianDistribution(action_pred)
-        dist.log_std = log_std
-        print(f'This is dist: {dist}')
-        log_prob = dist.log_prob(actions)
-        entropy = dist.entropy()
-        return values, log_prob, entropy
-        '''
         self.action_dist.proba_distribution(action_pred, self.log_std)
         log_prob = self.action_dist.log_prob(actions)
         entropy = self.action_dist.entropy()

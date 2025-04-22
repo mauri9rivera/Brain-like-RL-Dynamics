@@ -216,7 +216,7 @@ class CustomTargetReach(mn.environment.Environment):
     def __init__(self, effector, **kwargs):
         # Set task-specific parameters:
         self.elapsed = 0.0              # elapsed time in the episode
-        self.distance_criteria = 0.02 
+        self.distance_criteria = 0.005 
         self.cue_delay = 0.2            # 200 ms no-move phase
         # We assume the environment's dt is defined (e.g. dt = 0.02 s)
         self.dt = kwargs.pop("dt", 0.02)  # default timestep
@@ -325,7 +325,7 @@ class CustomTargetReach(mn.environment.Environment):
         
         # Compute reward:
         # Compute reward components
-        y_pos = th.where(in_target, th.tensor(0.0, device=action.device), th.tensor(5.0, device=action.device))
+        y_pos = th.where(in_target, th.tensor(0.0, device=action.device), th.tensor(1.0, device=action.device))
         y_ctrl = th.where(in_target, th.tensor(1.0, device=action.device), th.tensor(0.03, device=action.device))
         pos_error = th.sum(th.abs(fingertip - self.goal[:, :2]), dim=-1)
         
@@ -335,11 +335,10 @@ class CustomTargetReach(mn.environment.Environment):
         norm_f_squared = th.norm(f.clone().detach(), p=2) ** 2
         f_expanded = f.expand_as(action)
         # Compute the control term: square of (uₜ * f / norm_f_squared)
-        ctrl_term = th.sum((action * ((1000 *f_expanded) / norm_f_squared) ** 2), dim=-1)
+        ctrl_term = th.sum((action * ((f_expanded) / norm_f_squared) ** 2), dim=-1)
         
         # Compute reward as described:
         reward = - y_pos * pos_error - y_ctrl * ctrl_term
-        reward = pos_error #?#
         reward = reward.unsqueeze(-1)  # ensure shape is (batch_size, 1)
         #example: reward components: tensor([0.6731, 0.7756, 0.3219, 0.4017, 0.8585, 0.6772, 0.0000, 0.8300]) and ctrl_term: tensor([-0.0016,  0.0012, -0.0026,  0.0002, -0.0034, -0.0012, -0.0427, -0.0003])
         # Optionally, add reward components to info for debugging:
