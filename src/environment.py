@@ -197,7 +197,7 @@ class Arm:
             plt.title(self.effector.muscle_name[m])
         plt.show()
 
-class RandomTargetReach(mn.environment.Environment):
+class CustomTargetReach(mn.environment.Environment):
     """A custom reaching task:
        - The effector starts at a random state.
        - The target is drawn uniformly from the joint space (projected to Cartesian space),
@@ -215,14 +215,13 @@ class RandomTargetReach(mn.environment.Environment):
     
     def __init__(self, effector, **kwargs):
         # Set task-specific parameters:
-        self.distance_criteria = 0.005 # 0.5cm radius from target
-        self.target_radius = 0.01       # 1 cm radius target in meters
+        self.elapsed = 0.0              # elapsed time in the episode
+        self.distance_criteria = 0.02 
         self.cue_delay = 0.2            # 200 ms no-move phase
         # We assume the environment's dt is defined (e.g. dt = 0.02 s)
         self.dt = kwargs.pop("dt", 0.02)  # default timestep
-        self.batch_size = kwargs.pop("batch_size", 64)
-        self.hold_threshold = 0.8       # 800 ms hold threshold (in seconds)
-        self.elapsed = 0.0              # elapsed time in the episode
+        self.batch_size = kwargs.pop("batch_size", 128)
+        self.hold_threshold = 0.5       # 500 ms hold threshold (in seconds)
         self.hold_time = th.zeros(self.batch_size, device=self.device)            # duration the effector is continuously within target
 
         # Pass max_ep_duration to parent (5 seconds)
@@ -247,14 +246,12 @@ class RandomTargetReach(mn.environment.Environment):
         q_target = self.effector.draw_random_uniform_states(batch_size)  # shape: (batch_size, n_joints)
         q_start = self.effector.draw_random_uniform_states(batch_size)
 
-        # 4. Reset the effector using the start joint state.
-        options["joint_state"] = q_start
         obs, info = super().reset(seed=seed, options=options)
         
         # 4. Set the goal.
         cart_goal = self.joint2cartesian(q_target)
-        self.goal = cart_goal if self.differentiable else self.detach(cart_goal)
-        info["goal"] = cart_goal
+        self.goal = cart_goal
+        info["goal"] = cart_goal if self.differentiable else self.detach(cart_goal)
         
         # 6. Reset internal timers.
         self.elapsed = 0.0
@@ -309,18 +306,26 @@ class RandomTargetReach(mn.environment.Environment):
         # Assume the effector state info includes "states" with key "fingertip".
         fingertip = info["states"]["fingertip"]
         dist = th.norm(fingertip - self.goal[:, :2], dim=-1)  # L2 norm per batch
-        
         # Update hold time: increment where distance < threshold, reset otherwise
         in_target = dist < self.distance_criteria
         self.hold_time = th.where(in_target, self.hold_time + self.dt, th.zeros_like(self.hold_time))
-
-        # Terminate where hold_time exceeds threshold
-        terminated = self.hold_time >= self.hold_threshold
-        truncated = th.zeros_like(terminated, dtype=th.bool)
+        
+        #Termination conditions
+        successful_terminations = self.hold_time >= self.hold_threshold
+        unsuccessful_terminations = th.full_like(
+            successful_terminations,
+            self.elapsed >= self.max_ep_duration,
+            dtype=th.bool,
+            device=successful_terminations.device
+)
+        # Combine conditions (batched OR)
+        terminated = successful_terminations | unsuccessful_terminations
+        # Truncate only if time limit is reached (Gym convention)
+        truncated = unsuccessful_terminations #th.full_like(terminated, terminated_due_to_time, dtype=th.bool)
         
         # Compute reward:
         # Compute reward components
-        y_pos = th.where(in_target, th.tensor(0.0, device=action.device), th.tensor(1.0, device=action.device))
+        y_pos = th.where(in_target, th.tensor(0.0, device=action.device), th.tensor(5.0, device=action.device))
         y_ctrl = th.where(in_target, th.tensor(1.0, device=action.device), th.tensor(0.03, device=action.device))
         pos_error = th.sum(th.abs(fingertip - self.goal[:, :2]), dim=-1)
         
@@ -330,12 +335,13 @@ class RandomTargetReach(mn.environment.Environment):
         norm_f_squared = th.norm(f.clone().detach(), p=2) ** 2
         f_expanded = f.expand_as(action)
         # Compute the control term: square of (uₜ * f / norm_f_squared)
-        ctrl_term = th.sum((action * f_expanded / norm_f_squared) ** 2, dim=-1)
+        ctrl_term = th.sum((action * ((1000 *f_expanded) / norm_f_squared) ** 2), dim=-1)
         
         # Compute reward as described:
         reward = - y_pos * pos_error - y_ctrl * ctrl_term
+        reward = pos_error #?#
         reward = reward.unsqueeze(-1)  # ensure shape is (batch_size, 1)
-        
+        #example: reward components: tensor([0.6731, 0.7756, 0.3219, 0.4017, 0.8585, 0.6772, 0.0000, 0.8300]) and ctrl_term: tensor([-0.0016,  0.0012, -0.0026,  0.0002, -0.0034, -0.0012, -0.0427, -0.0003])
         # Optionally, add reward components to info for debugging:
         info["reward_components"] = {"pos_error": pos_error, "ctrl_term": ctrl_term}
         
@@ -347,11 +353,10 @@ class ObstacleReach(mn.environment.Environment):
     def __init__(self, effector, **kwargs):
             # Set task-specific parameters:
             self.distance_criteria = 0.005 # 0.5cm radius from target
-            self.target_radius = 0.01       # 1 cm radius target in meters
             self.cue_delay = 0.2            # 200 ms no-move phase
             # We assume the environment's dt is defined (e.g. dt = 0.02 s)
             self.dt = kwargs.pop("dt", 0.02)  # default timestep
-            self.batch_size = kwargs.pop("batch_size", 32)
+            self.batch_size = kwargs.pop("batch_size", 1)
             self.hold_threshold = 0.8       # 800 ms hold threshold (in seconds)
             self.elapsed = 0.0              # elapsed time in the episode
             self.hold_time = th.zeros(self.batch_size, device=self.device)            # duration the effector is continuously within target
@@ -465,7 +470,7 @@ class ObstacleReach(mn.environment.Environment):
         self.hold_time = th.where(in_target, self.hold_time + self.dt, th.zeros_like(self.hold_time))
 
         # Terminate where hold_time exceeds threshold
-        terminated = self.hold_time >= self.hold_threshold
+        terminated = self.hold_time >= self.hold_threshold or self.elapsed >= 5.0
         truncated = th.zeros_like(terminated, dtype=th.bool)
         
         # Compute reward:
@@ -562,7 +567,7 @@ class CenterOutReachEnv(mn.environment.Environment):
         self.cue_delay = 0.2            # 200 ms no-move phase
         # We assume the environment's dt is defined (e.g. dt = 0.02 s)
         self.dt = kwargs.pop("dt", 0.02)  # default timestep
-        self.batch_size = kwargs.pop("batch_size", 32)
+        self.batch_size = kwargs.pop("batch_size", 1)
         self.hold_threshold = 0.5       # 500 ms hold threshold (in seconds)
         self.elapsed = 0.0              # elapsed time in the episode
         self.hold_time = th.zeros(self.batch_size, device=self.device)            # duration the effector is continuously within target
@@ -665,7 +670,7 @@ class CenterOutReachEnv(mn.environment.Environment):
         self.hold_time = th.where(in_target, self.hold_time + self.dt, th.zeros_like(self.hold_time))
 
         # Terminate where hold_time exceeds threshold
-        terminated = self.hold_time >= self.hold_threshold
+        terminated = self.hold_time >= self.hold_threshold or self.elapsed >= 1.0
         truncated = th.zeros_like(terminated, dtype=th.bool)
         
         # Compute reward:

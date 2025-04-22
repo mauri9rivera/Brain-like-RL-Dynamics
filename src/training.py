@@ -4,7 +4,7 @@ import motornet as mn
 import matplotlib.pyplot as plt
 import numpy as np
 
-from environment import create_defaultReachTask, RandomTargetReach
+from environment import create_defaultReachTask, CustomTargetReach
 from networks import ACNetwork, Policy, Critic, default_ppo_kwargs
 from utils import *
 
@@ -195,6 +195,27 @@ def center_out_task(env, model, n_trials=1000, device="cpu"):
       neural_activities.append(np.array(trial_activity))
       trajectories.append(np.array(trial_traj))
 
+default_ppo = {
+        'gamma': 0.99,
+        'clip_epsilon': 0.2,
+        'update_epochs': 10,
+        'learning_rate': 3e-4,
+        'optimizer_lr': 1e-3,
+        'grad_norm_clip': 0.5,  # Added gradient clipping hyperparameter
+        'neural_reg_weight': 0.01,  # Neural activity regularization
+        'derivative_reg_weight': 0.1,  # Derivative regularization
+        }
+
+short_term_ppo = {
+        'gamma': 0.8,
+        'clip_epsilon': 0.2,
+        'update_epochs': 10,
+        'learning_rate': 3e-4,
+        'optimizer_lr': 1e-3,
+        'grad_norm_clip': 0.5,  # Added gradient clipping hyperparameter
+        'neural_reg_weight': 0.01,  # Neural activity regularization
+        'derivative_reg_weight': 0.1,  # Derivative regularization
+        }
 
 # Example usage:
 if __name__ == "__main__":

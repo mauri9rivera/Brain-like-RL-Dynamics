@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+import numpy as np
 import motornet as mn
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -68,6 +69,9 @@ def plot_simulations(xy, target_xy):
     target_x = target_xy[:, -1, 0]
     target_y = target_xy[:, -1, 1]
 
+    init_x = xy[:, 0, 0]
+    init_y = xy[:, 0, 1]
+
     plt.figure(figsize=(10,3))
 
     plt.subplot(1,2,1)
@@ -75,6 +79,8 @@ def plot_simulations(xy, target_xy):
     plt.xlim([-1.1, 1.1])
     plotor(axis=plt.gca(), cart_results=xy)
     plt.scatter(target_x, target_y)
+    plt.scatter(target_x, target_y, c="yellow", label="Target", marker="X")
+    plt.scatter(init_x, init_y, c="blue", label="Initial", marker="o")
 
     plt.subplot(1,2,2)
     plt.ylim([-2, 2])
@@ -93,13 +99,13 @@ def evaluate_pretrained(policy, env, batch_size):
     
     # Initialize environment
     obs, info = env.reset(options={"batch_size": batch_size})
-    terminated = False
+    terminated = np.zeros(batch_size, dtype=bool)
     xy = [info["states"]["fingertip"][:, None, :]]
     tg = [info["goal"][:, None, :]]
 
     # Run evaluation episode
-    while not terminated:
-        action, _, _ = policy(obs, deterministic=True)  # Deterministic actions
+    while not terminated.all():
+        action, _, _, _ = policy(obs, deterministic=True)  # Deterministic actions
         obs, _, terminated, _, info = env.step(action)
         xy.append(info["states"]["fingertip"][:, None, :])
         tg.append(info["goal"][:, None, :])
