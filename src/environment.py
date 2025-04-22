@@ -13,7 +13,7 @@ class Arm:
         if arm_type == 'arm210':
             self.effector = self.build_arm210(verbose)
         elif arm_type == 'arm26':
-            self.effector = self.build_arm_26(verbose)
+            self.effector = self.build_arm26(verbose)
 
     def build_arm210(self, verbose):
 
